@@ -7,16 +7,20 @@ from backend.app.api.ingestion import router as ingestion_router
 
 from backend.app.db.base import Base
 from backend.app.db.session import engine
+from backend.app.db.migrations import migrate_sqlite_schema
 
-from backend.app.models.job import Job  # noqa: F401
-from backend.app.models.ingestion_run import IngestionRun  # noqa: F401
+from backend.app.models.job import Job
+from backend.app.models.ingestion_run import IngestionRun
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    # Create missing tables without modifying existing records.
+    # Create missing tables first.
     Base.metadata.create_all(bind=engine)
+
+    # Apply additive migrations to existing SQLite tables.
+    migrate_sqlite_schema()
 
     yield
 
@@ -24,7 +28,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RoleRadar AI",
     description="Intelligent Job Discovery and Career Matching Platform",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -35,7 +39,7 @@ async def root():
     return {
         "project": "RoleRadar AI",
         "status": "running",
-        "version": "0.4.0",
+        "version": "0.5.0",
     }
 
 

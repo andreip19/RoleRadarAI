@@ -6,6 +6,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 
 from sqlalchemy.orm import Mapped, mapped_column
@@ -56,6 +57,20 @@ class IngestionRun(Base):
         Integer,
         nullable=False,
         default=0,
+    )
+
+    reactivated: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    deactivated: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
 
     error_message: Mapped[str | None] = mapped_column(

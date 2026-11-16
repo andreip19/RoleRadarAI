@@ -5,13 +5,16 @@ import httpx
 from sqlalchemy.orm import Session
 
 from backend.app.models.ingestion_run import IngestionRun
-from backend.app.services.job_service import upsert_jobs
+
+from backend.app.services.job_service import (
+    deactivate_missing_jobs,
+    upsert_jobs,
+)
 
 from scraper.greenhouse import fetch_greenhouse_jobs
 from scraper.lever import fetch_lever_jobs
 
 
-# Public job boards configured for RoleRadar AI.
 SOURCES = [
     {
         "source": "greenhouse",
@@ -29,15 +32,16 @@ SOURCES = [
 
 
 async def fetch_source_jobs(config: dict):
-    """Dispatch job collection to the appropriate connector."""
 
     source = config["source"]
     board_token = config["board_token"]
 
     if source == "greenhouse":
+
         return await fetch_greenhouse_jobs(board_token)
 
     if source == "lever":
+
         return await fetch_lever_jobs(
             site=board_token,
             company_name=config["company_name"],
@@ -48,7 +52,7 @@ async def fetch_source_jobs(config: dict):
 
 
 async def run_all_ingestion(db: Session) -> dict:
-    """Synchronize all configured job boards independently."""
+    """Synchronize configured sources and track job lifecycle."""
 
     results = []
 
@@ -71,19 +75,40 @@ async def run_all_ingestion(db: Session) -> dict:
 
         try:
 
-            # Step 1: Fetch source data.
+            # 1. Collect source data.
             jobs = await fetch_source_jobs(config)
 
-            # Step 2: Normalize and persist records.
+            # 2. Insert new jobs and update existing jobs.
             stats = upsert_jobs(db, jobs)
 
-            # Step 3: Record successful execution.
+            # 3. Reconcile missing jobs only after a successful
+            # non-empty collection.
+            observed_ids = list({
+                item["external_id"]
+                for item in jobs
+            })
+
+            deactivated = 0
+            empty_fetch_protected = not jobs
+
+            if jobs:
+
+                deactivated = deactivate_missing_jobs(
+                    db=db,
+                    source=source,
+                    board_token=board_token,
+                    observed_external_ids=observed_ids,
+                )
+
+            # 4. Save execution history.
             run = db.get(IngestionRun, run_id)
 
             run.status = "success"
             run.fetched = len(jobs)
             run.inserted = stats["inserted"]
             run.updated = stats["updated"]
+            run.reactivated = stats["reactivated"]
+            run.deactivated = deactivated
             run.finished_at = datetime.now(timezone.utc)
 
             db.commit()
@@ -95,12 +120,14 @@ async def run_all_ingestion(db: Session) -> dict:
                 "fetched": len(jobs),
                 "inserted": stats["inserted"],
                 "updated": stats["updated"],
+                "reactivated": stats["reactivated"],
+                "deactivated": deactivated,
+                "empty_fetch_protected": empty_fetch_protected,
                 "total_processed": stats["total_processed"],
             })
 
         except Exception as exc:
 
-            # A source failure must not stop other connectors.
             db.rollback()
 
             failed_run = db.get(IngestionRun, run_id)
@@ -121,8 +148,8 @@ async def run_all_ingestion(db: Session) -> dict:
             })
 
     succeeded = sum(
-        result["status"] == "success"
-        for result in results
+        item["status"] == "success"
+        for item in results
     )
 
     failed = len(results) - succeeded

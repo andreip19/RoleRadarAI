@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -25,8 +25,12 @@ class JobRead(BaseModel):
     departments: list[str]
     offices: list[str]
 
+    is_active: bool
+    missing_runs: int
+
     first_seen_at: datetime
     last_seen_at: datetime
+    inactive_at: datetime | None
 
 
 class JobListResponse(BaseModel):

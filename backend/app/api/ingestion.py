@@ -21,9 +21,7 @@ router = APIRouter(
 async def run_all(
     db: Session = Depends(get_db),
 ):
-    """
-    Execute all configured job ingestion connectors.
-    """
+    """Execute all configured ingestion connectors."""
 
     return await run_all_ingestion(db)
 
@@ -34,9 +32,7 @@ def list_ingestion_runs(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """
-    Retrieve ingestion execution history.
-    """
+    """Retrieve ingestion execution history."""
 
     total = db.scalar(
         select(func.count()).select_from(IngestionRun)
@@ -62,6 +58,8 @@ def list_ingestion_runs(
                 "fetched": run.fetched,
                 "inserted": run.inserted,
                 "updated": run.updated,
+                "reactivated": run.reactivated,
+                "deactivated": run.deactivated,
                 "error_message": run.error_message,
                 "started_at": (
                     run.started_at.isoformat()

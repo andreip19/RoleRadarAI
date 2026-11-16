@@ -1,13 +1,16 @@
-from datetime import datetime
+﻿from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Index,
+    Integer,
     JSON,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 
 from sqlalchemy.orm import Mapped, mapped_column
@@ -29,6 +32,7 @@ class Job(Base):
         Index("ix_jobs_title", "title"),
         Index("ix_jobs_company", "company"),
         Index("ix_jobs_location", "location"),
+        Index("ix_jobs_is_active", "is_active"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -92,20 +96,42 @@ class Job(Base):
         nullable=False,
     )
 
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("1"),
+    )
+
+    missing_runs: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+        nullable=False,
     )
 
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+        nullable=False,
+    )
+
+    inactive_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     def __repr__(self) -> str:
         return (
             f"Job(id={self.id}, "
             f"title={self.title!r}, "
-            f"company={self.company!r})"
+            f"company={self.company!r}, "
+            f"is_active={self.is_active})"
         )

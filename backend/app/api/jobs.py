@@ -373,3 +373,119 @@ def list_jobs(
         "offset": offset,
         "items": jobs,
     }
+
+
+# ============================================================
+# JOB LIFECYCLE - ACTIVE / INACTIVE / STATISTICS
+# ============================================================
+
+def _list_jobs_by_status(
+    is_active: bool,
+    db: Session,
+    limit: int,
+    offset: int,
+):
+
+    statement = select(Job).where(
+        Job.is_active.is_(is_active)
+    )
+
+    total = db.scalar(
+        select(func.count()).select_from(
+            statement.subquery()
+        )
+    ) or 0
+
+    jobs = db.scalars(
+        statement
+        .order_by(Job.last_seen_at.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": jobs,
+    }
+
+
+@router.get(
+    "/active",
+    response_model=JobListResponse,
+)
+def list_active_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Retrieve currently active job postings."""
+
+    return _list_jobs_by_status(
+        is_active=True,
+        db=db,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/inactive",
+    response_model=JobListResponse,
+)
+def list_inactive_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Retrieve inactive job postings."""
+
+    return _list_jobs_by_status(
+        is_active=False,
+        db=db,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/statistics")
+def get_job_statistics(
+    db: Session = Depends(get_db),
+):
+    """Return job lifecycle statistics."""
+
+    total = db.scalar(
+        select(func.count()).select_from(Job)
+    ) or 0
+
+    active = db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.is_active.is_(True)
+        )
+    ) or 0
+
+    inactive = db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.is_active.is_(False)
+        )
+    ) or 0
+
+    source_rows = db.execute(
+        select(
+            Job.source,
+            func.count(),
+        ).where(
+            Job.is_active.is_(True)
+        ).group_by(Job.source)
+    ).all()
+
+    return {
+        "total": total,
+        "active": active,
+        "inactive": inactive,
+        "by_source": {
+            source: count
+            for source, count in source_rows
+        },
+    }
