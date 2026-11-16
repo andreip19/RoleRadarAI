@@ -1,8 +1,16 @@
-﻿from datetime import datetime, timezone
+﻿import logging
+import time
 
-import httpx
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
+
+from backend.app.core.metrics import (
+    INGESTION_DURATION,
+    INGESTION_JOBS,
+    INGESTION_LAST_SUCCESS,
+    INGESTION_RUNS,
+)
 
 from backend.app.models.ingestion_run import IngestionRun
 
@@ -13,6 +21,9 @@ from backend.app.services.job_service import (
 
 from scraper.greenhouse import fetch_greenhouse_jobs
 from scraper.lever import fetch_lever_jobs
+
+
+logger = logging.getLogger("roleradar.ingestion")
 
 
 SOURCES = [
@@ -37,11 +48,9 @@ async def fetch_source_jobs(config: dict):
     board_token = config["board_token"]
 
     if source == "greenhouse":
-
         return await fetch_greenhouse_jobs(board_token)
 
     if source == "lever":
-
         return await fetch_lever_jobs(
             site=board_token,
             company_name=config["company_name"],
@@ -52,7 +61,7 @@ async def fetch_source_jobs(config: dict):
 
 
 async def run_all_ingestion(db: Session) -> dict:
-    """Synchronize configured sources and track job lifecycle."""
+    """Synchronize all configured sources and monitor executions."""
 
     results = []
 
@@ -60,6 +69,8 @@ async def run_all_ingestion(db: Session) -> dict:
 
         source = config["source"]
         board_token = config["board_token"]
+
+        started_perf = time.perf_counter()
 
         run = IngestionRun(
             source=source,
@@ -73,16 +84,23 @@ async def run_all_ingestion(db: Session) -> dict:
 
         run_id = run.id
 
+        logger.info(
+            "ingestion_started",
+            extra={
+                "source": source,
+                "board_token": board_token,
+            },
+        )
+
         try:
 
-            # 1. Collect source data.
+            # 1. Collect public job postings.
             jobs = await fetch_source_jobs(config)
 
             # 2. Insert new jobs and update existing jobs.
             stats = upsert_jobs(db, jobs)
 
-            # 3. Reconcile missing jobs only after a successful
-            # non-empty collection.
+            # 3. Reconcile missing jobs after successful collection.
             observed_ids = list({
                 item["external_id"]
                 for item in jobs
@@ -113,7 +131,37 @@ async def run_all_ingestion(db: Session) -> dict:
 
             db.commit()
 
-            results.append({
+            duration = time.perf_counter() - started_perf
+
+            # 5. Update Prometheus metrics.
+            INGESTION_RUNS.labels(
+                source=source,
+                status="success",
+            ).inc()
+
+            for action in (
+                "inserted",
+                "updated",
+                "reactivated",
+                "deactivated",
+            ):
+
+                INGESTION_JOBS.labels(
+                    source=source,
+                    action=action,
+                ).inc(stats.get(action, 0) if action != "deactivated"
+                      else deactivated)
+
+            INGESTION_DURATION.labels(
+                source=source,
+            ).observe(duration)
+
+            INGESTION_LAST_SUCCESS.labels(
+                source=source,
+                board_token=board_token,
+            ).set(time.time())
+
+            result = {
                 "source": source,
                 "board_token": board_token,
                 "status": "success",
@@ -122,9 +170,17 @@ async def run_all_ingestion(db: Session) -> dict:
                 "updated": stats["updated"],
                 "reactivated": stats["reactivated"],
                 "deactivated": deactivated,
+                "duration_seconds": round(duration, 3),
                 "empty_fetch_protected": empty_fetch_protected,
                 "total_processed": stats["total_processed"],
-            })
+            }
+
+            logger.info(
+                "ingestion_completed",
+                extra=result,
+            )
+
+            results.append(result)
 
         except Exception as exc:
 
@@ -140,11 +196,31 @@ async def run_all_ingestion(db: Session) -> dict:
 
                 db.commit()
 
+            duration = time.perf_counter() - started_perf
+
+            INGESTION_RUNS.labels(
+                source=source,
+                status="error",
+            ).inc()
+
+            INGESTION_DURATION.labels(
+                source=source,
+            ).observe(duration)
+
+            logger.exception(
+                "ingestion_failed",
+                extra={
+                    "source": source,
+                    "board_token": board_token,
+                },
+            )
+
             results.append({
                 "source": source,
                 "board_token": board_token,
                 "status": "error",
                 "error": str(exc),
+                "duration_seconds": round(duration, 3),
             })
 
     succeeded = sum(
@@ -154,9 +230,19 @@ async def run_all_ingestion(db: Session) -> dict:
 
     failed = len(results) - succeeded
 
-    return {
+    summary = {
         "total_sources": len(SOURCES),
         "succeeded": succeeded,
         "failed": failed,
         "results": results,
     }
+
+    logger.info(
+        "ingestion_pipeline_completed",
+        extra={
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+    )
+
+    return summary
