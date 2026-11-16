@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -100,7 +100,7 @@ class Job(Base):
         Boolean,
         nullable=False,
         default=True,
-        server_default=text("1"),
+        server_default=text("true"),
     )
 
     missing_runs: Mapped[int] = mapped_column(
