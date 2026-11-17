@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import time
 
 from contextlib import asynccontextmanager
@@ -10,6 +10,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from backend.app.api.jobs import router as jobs_router
 from backend.app.api.ingestion import router as ingestion_router
+from backend.app.api.ai import router as ai_router
 
 from backend.app.core.logging_config import configure_logging
 
@@ -147,3 +148,4 @@ def prometheus_metrics():
 
 app.include_router(jobs_router)
 app.include_router(ingestion_router)
+app.include_router(ai_router)
