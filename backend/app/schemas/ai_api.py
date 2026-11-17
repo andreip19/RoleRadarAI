@@ -51,6 +51,7 @@ class SkillJobItem(BaseModel):
     title: str
     company: str | None
     location: str | None
+    description: str | None
     source: str
     url: str | None
     is_active: bool

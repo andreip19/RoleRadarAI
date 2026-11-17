@@ -282,6 +282,7 @@ def list_jobs_for_skill(
             title=row.Job.title,
             company=row.Job.company,
             location=row.Job.location,
+            description=row.Job.description,
             source=row.Job.source,
             url=row.Job.url,
             is_active=row.Job.is_active,

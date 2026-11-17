@@ -922,6 +922,7 @@ function App() {
                                     title: job.title,
                                     company: job.company,
                                     location: job.location,
+                                    description: job.description,
                                     source: job.source,
                                     url: job.url,
                                     is_active: job.is_active,

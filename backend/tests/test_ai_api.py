@@ -252,6 +252,9 @@ def test_list_jobs_for_skill_returns_only_active_by_default(
         title="Active Python Developer",
         is_active=True,
     )
+    active_job.description = (
+        "Build and maintain Python services using Git."
+    )
 
     inactive_job = create_job(
         db_session,
@@ -290,6 +293,9 @@ def test_list_jobs_for_skill_returns_only_active_by_default(
     assert len(data["items"]) == 1
     assert data["items"][0]["job_id"] == active_job.id
     assert data["items"][0]["is_active"] is True
+    assert data["items"][0]["description"] == (
+        "Build and maintain Python services using Git."
+    )
 
     all_response = client.get(
         f"/api/v1/skills/{git.id}/jobs?active_only=false"
