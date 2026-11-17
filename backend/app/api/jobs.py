@@ -302,6 +302,9 @@ def list_jobs(
         default=None,
         max_length=200,
     ),
+    source: Literal["greenhouse", "lever"] | None = Query(
+        default=None,
+    ),
     location: str | None = Query(
         default=None,
         max_length=200,
@@ -321,7 +324,7 @@ def list_jobs(
 
     statement = select(Job)
 
-    # Search in job title and description
+    # Search across the fields users see in the job explorer.
     if q and q.strip():
 
         pattern = f"%{q.strip()}%"
@@ -329,6 +332,7 @@ def list_jobs(
         statement = statement.where(
             or_(
                 Job.title.ilike(pattern),
+                Job.company.ilike(pattern),
                 Job.description.ilike(pattern),
             )
         )
@@ -350,6 +354,9 @@ def list_jobs(
                 f"%{location.strip()}%"
             )
         )
+
+    if source:
+        statement = statement.where(Job.source == source)
 
     # Calculate total number of matching jobs
     count_statement = (
