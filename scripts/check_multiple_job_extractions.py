@@ -1,11 +1,15 @@
-﻿from sqlalchemy import inspect as sqlalchemy_inspect, select
+from sqlalchemy import inspect as sqlalchemy_inspect, select, text
 
 from backend.app.db.session import SessionLocal
 from backend.app.models.job import Job
-from backend.app.services.gemini_service import extract_job_analysis
+from backend.app.services.skill_extraction_service import PIPELINE_VERSION
 
 
-SAMPLE_JOB_IDS = [1124, 1125, 1123, 1114, 1119]
+SAMPLE_JOB_IDS = [
+    1124, 1125, 1123, 1114, 1119,
+    231, 633, 1014, 1107, 1117, 1120, 629, 997, 338, 255,
+]
+MIN_DESCRIPTION_LENGTH = 200
 
 
 def find_field(fields, candidates, required=True):
@@ -53,12 +57,13 @@ def main():
         getattr(Job, id_field).in_(SAMPLE_JOB_IDS)
     )
 
-    if active_field:
-        statement = statement.where(
-            getattr(Job, active_field).is_(True)
-        )
-
     with SessionLocal() as db:
+        dialect = db.get_bind().dialect.name
+        if dialect == "postgresql":
+            db.execute(text("SET TRANSACTION READ ONLY"))
+        elif dialect == "sqlite":
+            db.execute(text("PRAGMA query_only = ON"))
+
         jobs = db.execute(statement).scalars().all()
 
         records = []
@@ -76,20 +81,52 @@ def main():
                     getattr(job, source_field)
                     if source_field else None
                 ),
+                "is_active": (
+                    getattr(job, active_field)
+                    if active_field else True
+                ),
             })
 
-    found_ids = {record["id"] for record in records}
-    missing_ids = set(SAMPLE_JOB_IDS) - found_ids
+    records_by_id = {record["id"]: record for record in records}
+    missing_ids = set(SAMPLE_JOB_IDS) - records_by_id.keys()
+    inactive_ids = sorted(
+        job_id
+        for job_id in SAMPLE_JOB_IDS
+        if job_id in records_by_id and not records_by_id[job_id]["is_active"]
+    )
+    short_description_ids = sorted(
+        job_id
+        for job_id in SAMPLE_JOB_IDS
+        if (
+            job_id in records_by_id
+            and len(str(records_by_id[job_id]["description"] or "").strip())
+            < MIN_DESCRIPTION_LENGTH
+        )
+    )
 
-    if missing_ids:
+    if missing_ids or inactive_ids or short_description_ids:
+        problems = []
+        if missing_ids:
+            problems.append(f"ID-uri inexistente: {sorted(missing_ids)}")
+        if inactive_ids:
+            problems.append(f"ID-uri inactive: {inactive_ids}")
+        if short_description_ids:
+            problems.append(
+                "Descrieri prea scurte (sub "
+                f"{MIN_DESCRIPTION_LENGTH} caractere): "
+                f"{short_description_ids}"
+            )
         raise RuntimeError(
-            f"Joburi inexistente sau inactive: {sorted(missing_ids)}"
+            "Validarea esantionului a esuat inainte de apelurile Gemini. "
+            + "; ".join(problems)
         )
 
     records.sort(key=lambda record: SAMPLE_JOB_IDS.index(record["id"]))
 
+    from backend.app.services.gemini_service import extract_job_analysis
+
     print("=" * 75)
-    print("ROLERADAR AI - TESTARE GEMINI PE CINCI JOBURI REALE")
+    print(f"ROLERADAR AI - TESTARE GEMINI V{PIPELINE_VERSION} PE 15 JOBURI REALE")
     print("=" * 75)
 
     successful = 0
@@ -101,18 +138,13 @@ def main():
         company = record["company"]
 
         print(f"\n\n{'=' * 75}")
-        print(f"TEST {index}/5")
+        print(f"TEST {index}/{len(SAMPLE_JOB_IDS)}")
         print(f"ID: {record['id']}")
         print(f"Companie: {company or 'N/A'}")
         print(f"Sursa: {record['source'] or 'N/A'}")
         print(f"Titlu: {title}")
         print(f"Lungime descriere: {len(description)} caractere")
         print("=" * 75)
-
-        if len(description) < 200:
-            print("EROARE: Descriere prea scurta.")
-            failed += 1
-            continue
 
         try:
             result = extract_job_analysis(
@@ -122,9 +154,18 @@ def main():
             )
 
             print("\nREZULTAT GEMINI:")
-            print(result.model_dump_json(indent=2))
+            print(f"Categorie rol: {result.role_category}")
+            print(f"Senioritate: {result.seniority}")
+            print(f"Rezumat: {result.summary}")
+            print(f"\nCompetente extrase ({len(result.skills)}):")
 
-            print(f"\nNumar competente: {len(result.skills)}")
+            for skill in result.skills:
+                print(
+                    f"- {skill.name} | categorie: {skill.category} | "
+                    f"cerinta: {skill.requirement} | "
+                    f"dovada: {skill.evidence}"
+                )
+
             successful += 1
 
         except Exception as exc:
@@ -134,8 +175,10 @@ def main():
     print(f"\n\n{'=' * 75}")
     print("REZUMAT TESTARE")
     print("=" * 75)
-    print(f"Teste reusite: {successful}/5")
-    print(f"Teste esuate: {failed}/5")
+    print(f"Teste reusite: {successful}/{len(SAMPLE_JOB_IDS)}")
+    print(f"Teste esuate: {failed}/{len(SAMPLE_JOB_IDS)}")
+    print(f"Total joburi in esantion: {len(SAMPLE_JOB_IDS)}")
+    print(f"ID-uri: {', '.join(map(str, SAMPLE_JOB_IDS))}")
     print("Baza de date nu a fost modificata.")
     print("=" * 75)
 

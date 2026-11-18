@@ -1,4 +1,6 @@
-﻿from typing import Literal
+﻿import re
+import unicodedata
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -22,6 +24,7 @@ RoleCategory = Literal[
     "marketing",
     "customer_success",
     "design",
+    "technical_writing",
     "business_operations",
     "human_resources",
     "finance",
@@ -94,6 +97,13 @@ class ExtractedSkill(BaseModel):
         return value
 
 
+def _normalize_skill_key(value: str) -> str:
+    """Create a stable key for punctuation and spacing variants."""
+
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    return re.sub(r"[\s._/\-\u2010-\u2015]+", "", normalized)
+
+
 class JobAnalysisResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
@@ -117,13 +127,36 @@ class JobAnalysisResult(BaseModel):
         cls,
         skills: list[ExtractedSkill],
     ) -> list[ExtractedSkill]:
+        """Deduplicate skill variants while retaining the strongest evidence."""
+
+        requirement_priority = {
+            "mentioned": 1,
+            "preferred": 2,
+            "required": 3,
+        }
 
         unique = {}
 
         for skill in skills:
-            key = " ".join(skill.name.casefold().split())
+            key = _normalize_skill_key(skill.name)
+            current = unique.get(key)
 
-            if key not in unique:
+            if current is None:
+                unique[key] = skill
+                continue
+
+            new_priority = requirement_priority[skill.requirement]
+            current_priority = requirement_priority[current.requirement]
+
+            # Prefer a stronger requirement. For equal levels, prefer
+            # the shorter, more focused evidence quotation.
+            if (
+                new_priority > current_priority
+                or (
+                    new_priority == current_priority
+                    and len(skill.evidence) < len(current.evidence)
+                )
+            ):
                 unique[key] = skill
 
         return list(unique.values())

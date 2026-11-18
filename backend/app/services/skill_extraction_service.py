@@ -3,9 +3,11 @@ import json
 import logging
 import os
 import re
+import unicodedata
+from collections.abc import Callable
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -18,7 +20,7 @@ from backend.app.services.gemini_service import extract_job_analysis
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "9"
 
 REQUIREMENT_PRIORITY = {
     "mentioned": 1,
@@ -28,25 +30,42 @@ REQUIREMENT_PRIORITY = {
 
 
 def normalize_skill_name(name: str) -> str:
-    """Normalize a skill name for catalog deduplication."""
-    return re.sub(r"\s+", " ", name.casefold()).strip()
+    """Normalize Unicode and formatting variants for skill deduplication."""
+
+    normalized = unicodedata.normalize("NFKC", name).casefold().strip()
+
+    # Treat spacing, dots, slashes and hyphens as formatting differences.
+    # Keep meaningful characters such as + and # (C++ and C#).
+    return re.sub(r"[\s._/\-\u2010-\u2015]+", "", normalized)
 
 
 def canonicalize_skill(name: str, evidence: str) -> str:
     """
-    Resolve only unambiguous aliases supported by their evidence.
+    Resolve only unambiguous aliases explicitly supported by evidence.
 
-    CSV is expanded only when the evidence explicitly mentions
-    Computer Software Validation.
+    OpenID Connect is the stable catalog name for both OIDC and its full
+    name. CSV and RTSM are canonicalized only when both forms occur in
+    the evidence.
     """
     normalized_name = normalize_skill_name(name)
     normalized_evidence = normalize_skill_name(evidence)
 
+    if normalized_name in {"oidc", "openidconnect"}:
+        return "OpenID Connect"
+
     if (
-        normalized_name == "csv"
-        and "computer software validation" in normalized_evidence
+        normalized_name in {"csv", "computersoftwarevalidation"}
+        and "computersoftwarevalidation" in normalized_evidence
+        and re.search(r"\bcsv\b", evidence, re.IGNORECASE)
     ):
         return "Computer Software Validation"
+
+    if (
+        normalized_name in {"rtsm", "randomizationandtrialsupplymanagement"}
+        and "rtsm" in normalized_evidence
+        and "randomizationandtrialsupplymanagement" in normalized_evidence
+    ):
+        return "RTSM"
 
     return name.strip()
 
@@ -75,13 +94,58 @@ def calculate_content_hash(
     ).hexdigest()
 
 
+def _find_legacy_skill_match(skills, normalized_name: str):
+    """Find an existing catalog entry using the current name normalization."""
+
+    return next(
+        (
+            candidate
+            for candidate in skills
+            if normalize_skill_name(
+                canonicalize_skill(candidate.name, "")
+            ) == normalized_name
+        ),
+        None,
+    )
+
+
 def get_or_create_skill(
     db: Session,
     name: str,
     category: str,
 ) -> int:
-    """Insert a skill in PostgreSQL or reuse its existing catalog entry."""
+    """Reuse an equivalent existing skill before inserting a new catalog entry."""
+
+    name = canonicalize_skill(name, "")
     normalized_name = normalize_skill_name(name)
+
+    def find_existing():
+        exact_match = db.scalar(
+            select(Skill).where(
+                Skill.normalized_name == normalized_name
+            )
+        )
+
+        if exact_match is not None:
+            return exact_match
+
+        existing_skills = db.scalars(
+            select(Skill).order_by(Skill.id)
+        ).all()
+
+        return _find_legacy_skill_match(
+            existing_skills,
+            normalized_name,
+        )
+
+    # Check both current and legacy catalog keys before inserting.
+    existing_skill = find_existing()
+
+    if existing_skill is not None:
+        if existing_skill.category is None:
+            existing_skill.category = category
+
+        return existing_skill.id
 
     statement = (
         pg_insert(Skill)
@@ -101,11 +165,8 @@ def get_or_create_skill(
     if skill_id is not None:
         return skill_id
 
-    existing_skill = db.scalar(
-        select(Skill).where(
-            Skill.normalized_name == normalized_name
-        )
-    )
+    # Handle a concurrent insert using the same catalog key.
+    existing_skill = find_existing()
 
     if existing_skill is None:
         raise RuntimeError(
@@ -118,10 +179,96 @@ def get_or_create_skill(
     return existing_skill.id
 
 
+def _analysis_association_integrity(
+    db: Session,
+    job_id: int,
+    result_json: dict | None,
+) -> tuple[bool, str]:
+    """Compare saved analysis skills with the current job-skill rows."""
+    if not isinstance(result_json, dict) or not isinstance(result_json.get("skills"), list):
+        return False, "Analiza nu conține o listă validă de competențe în result_json."
+
+    expected = {}
+    for item in result_json["skills"]:
+        if not isinstance(item, dict) or not item.get("name"):
+            return False, "Analiza conține o competență fără nume valid."
+        evidence = item.get("evidence") or ""
+        canonical_name = canonicalize_skill(str(item["name"]), str(evidence))
+        key = normalize_skill_name(canonical_name)
+        candidate = (canonical_name, item.get("requirement"), evidence)
+        current = expected.get(key)
+        if current is None or (
+            REQUIREMENT_PRIORITY.get(candidate[1], 0)
+            > REQUIREMENT_PRIORITY.get(current[1], 0)
+            or (
+                REQUIREMENT_PRIORITY.get(candidate[1], 0)
+                == REQUIREMENT_PRIORITY.get(current[1], 0)
+                and len(candidate[2]) < len(current[2])
+            )
+        ):
+            expected[key] = candidate
+
+    rows = db.execute(
+        select(Skill.name, JobSkill.requirement, JobSkill.evidence)
+        .join(JobSkill, JobSkill.skill_id == Skill.id)
+        .where(JobSkill.job_id == job_id)
+    ).all()
+
+    actual = {}
+    duplicate_associations = []
+    for name, requirement, evidence in rows:
+        canonical_name = canonicalize_skill(name, evidence)
+        key = normalize_skill_name(canonical_name)
+        if key in actual:
+            duplicate_associations.append(canonical_name)
+        actual[key] = (
+            canonical_name,
+            requirement,
+            evidence,
+        )
+
+    if expected == actual and not duplicate_associations:
+        return True, ""
+
+    missing = [
+        details[0]
+        for key, details in expected.items()
+        if key not in actual
+    ]
+    extra = [
+        details[0]
+        for key, details in actual.items()
+        if key not in expected
+    ]
+    mismatched = [
+        expected[key][0]
+        for key in expected.keys() & actual.keys()
+        if expected[key] != actual[key]
+    ]
+    reasons = []
+    if missing:
+        reasons.append("lipsesc: " + ", ".join(sorted(missing)))
+    if extra:
+        reasons.append("în plus: " + ", ".join(sorted(extra)))
+    if mismatched:
+        reasons.append("nivel/dovadă diferită: " + ", ".join(sorted(mismatched)))
+    if duplicate_associations:
+        reasons.append(
+            "asocieri duplicate după canonicalizare: "
+            + ", ".join(sorted(set(duplicate_associations)))
+        )
+    return False, "; ".join(reasons) or "Numărul sau conținutul competențelor diferă."
+
+
+def _database_dialect(db: Session) -> str:
+    return db.get_bind().dialect.name
+
+
 def process_job(
     db: Session,
     job_id: int,
     apply: bool = False,
+    on_gemini_request: Callable[[], None] | None = None,
 ) -> dict:
     """
     Analyze and optionally persist one job.
@@ -134,11 +281,40 @@ def process_job(
         Call Gemini and persist the validated analysis atomically.
     """
 
-    if db.get_bind().dialect.name != "postgresql":
+    if _database_dialect(db) != "postgresql":
         raise RuntimeError(
             "AI processing requires PostgreSQL. "
             "SQLite processing is disabled."
         )
+
+    if not apply:
+        if db.in_transaction():
+            raise RuntimeError(
+                "Dry-run requires a session without an active transaction "
+                "so read-only mode can be set before its first query."
+            )
+        try:
+            # This must be the first SQL statement in the transaction.
+            db.execute(text("SET TRANSACTION READ ONLY"))
+            return _process_job(db, job_id, apply=False)
+        finally:
+            # A dry-run never commits; rollback closes the read-only transaction.
+            db.rollback()
+
+    return _process_job(
+        db,
+        job_id,
+        apply=True,
+        on_gemini_request=on_gemini_request,
+    )
+
+
+def _process_job(
+    db: Session,
+    job_id: int,
+    apply: bool,
+    on_gemini_request: Callable[[], None] | None = None,
+) -> dict:
 
     model_name = os.getenv(
         "GEMINI_MODEL",
@@ -182,6 +358,18 @@ def process_job(
         and existing_analysis.content_hash == content_hash
         and existing_analysis.model_name == model_name
     ):
+        is_consistent, explanation = _analysis_association_integrity(
+            db,
+            job.id,
+            existing_analysis.result_json,
+        )
+        if not is_consistent:
+            return {
+                "status": "inconsistent",
+                "job_id": job.id,
+                "title": job.title,
+                "reason": explanation,
+            }
         return {
             "status": "unchanged",
             "job_id": job.id,
@@ -202,6 +390,7 @@ def process_job(
             title=job.title,
             description=job.description,
             company=job.company,
+            on_request=on_gemini_request,
         )
 
         # Canonicalize and deduplicate extracted skills.
@@ -223,6 +412,11 @@ def process_job(
                 current is None
                 or REQUIREMENT_PRIORITY[extracted_skill.requirement]
                 > REQUIREMENT_PRIORITY[current[0].requirement]
+                or (
+                    REQUIREMENT_PRIORITY[extracted_skill.requirement]
+                    == REQUIREMENT_PRIORITY[current[0].requirement]
+                    and len(extracted_skill.evidence) < len(current[0].evidence)
+                )
             ):
                 canonical_skills[normalized_name] = (
                     extracted_skill,
