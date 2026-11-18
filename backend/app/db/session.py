@@ -47,6 +47,13 @@ if parsed_url.get_backend_name() == "sqlite":
     if parsed_url.database in (None, "", ":memory:"):
 
         engine_options["poolclass"] = StaticPool
+else:
+    engine_options.update(
+        pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
+        pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        pool_recycle=int(os.getenv("DB_POOL_RECYCLE", "1800")),
+    )
 
 
 engine = create_engine(

@@ -1,23 +1,27 @@
-﻿async function request(path) {
+﻿const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+
+async function request(path) {
   let response
 
   try {
-    response = await fetch(path, {
+    response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
         Accept: 'application/json',
       },
     })
   } catch {
     throw new Error(
-      'Cannot connect to RoleRadar AI backend. Make sure FastAPI is running on port 8010.',
+      'Cannot connect to the RoleRadar AI API. Check the API URL and try again.',
     )
   }
 
-  const payload = await response.json().catch(() => null)
+  const payload = response.status === 204
+    ? null
+    : await response.json().catch(() => null)
 
   if (!response.ok) {
     const error = new Error(
-      payload?.detail || `Request failed with status ${response.status}`,
+      payload?.detail || response.statusText || `Request failed with status ${response.status}`,
     )
 
     error.status = response.status
@@ -39,6 +43,8 @@ function buildQuery(values) {
 
   return params.toString()
 }
+
+export { API_BASE_URL }
 
 export const api = {
   getHealth() {

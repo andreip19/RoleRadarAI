@@ -4,6 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.db.dependencies import get_db
+from backend.app.core.security import require_admin
 from backend.app.models.ingestion_run import IngestionRun
 
 from backend.app.services.ingestion_service import (
@@ -17,7 +18,7 @@ router = APIRouter(
 )
 
 
-@router.post("/run-all")
+@router.post("/run-all", dependencies=[Depends(require_admin)])
 async def run_all(
     db: Session = Depends(get_db),
 ):

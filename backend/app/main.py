@@ -3,16 +3,22 @@ import time
 
 from contextlib import asynccontextmanager
 
+import os
+
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.api.jobs import router as jobs_router
 from backend.app.api.ingestion import router as ingestion_router
 from backend.app.api.ai import router as ai_router
 
 from backend.app.core.logging_config import configure_logging
+from backend.app.core.security import app_environment, validate_production_config
 
 from backend.app.core.metrics import (
     HTTP_REQUESTS,
@@ -35,6 +41,8 @@ logger = logging.getLogger("roleradar.http")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
+    validate_production_config()
+
     Base.metadata.create_all(bind=engine)
 
     migrate_sqlite_schema()
@@ -51,6 +59,29 @@ app = FastAPI(
     description="Intelligent Job Discovery and Career Matching Platform",
     version="0.6.0",
     lifespan=lifespan,
+)
+
+
+def configured_cors_origins() -> list[str]:
+    origins = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if app_environment() == "development":
+        origins.extend(("http://localhost:5173", "http://127.0.0.1:5173"))
+    origins = list(dict.fromkeys(origins))
+    if "*" in origins:
+        raise RuntimeError("CORS_ORIGINS cannot contain a wildcard.")
+    return origins
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Authorization", "Content-Type"],
 )
 
 
@@ -132,6 +163,24 @@ async def health():
         "status": "healthy",
         "service": "backend",
     }
+
+
+@app.get("/ready")
+async def readiness():
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "readiness_database_unavailable",
+            extra={"error_type": type(exc).__name__},
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "service": "backend"},
+        )
+
+    return {"status": "ready", "service": "backend"}
 
 
 @app.get(

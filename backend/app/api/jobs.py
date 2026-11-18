@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.db.dependencies import get_db
+from backend.app.core.security import require_admin
 from backend.app.models.job import Job
 from backend.app.schemas.job import JobListResponse
 from backend.app.services.job_service import upsert_jobs
@@ -91,7 +92,7 @@ async def get_greenhouse_jobs(
 # GREENHOUSE - SYNCHRONIZE JOBS WITH DATABASE
 # ============================================================
 
-@router.post("/greenhouse/{board_token}/sync")
+@router.post("/greenhouse/{board_token}/sync", dependencies=[Depends(require_admin)])
 async def sync_greenhouse_jobs(
     board_token: str = Path(
         min_length=1,
@@ -219,7 +220,7 @@ async def get_lever_jobs(
 # LEVER - SYNCHRONIZE JOBS WITH DATABASE
 # ============================================================
 
-@router.post("/lever/{site}/sync")
+@router.post("/lever/{site}/sync", dependencies=[Depends(require_admin)])
 async def sync_lever_jobs(
     site: str = Path(
         min_length=1,

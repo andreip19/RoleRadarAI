@@ -9,3 +9,6 @@ __pycache__/
 *.sqlite3
 *.db
 .vscode/
+
+# Local processing and diagnostic reports
+reports/
