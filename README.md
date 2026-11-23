@@ -36,6 +36,8 @@ Vite serves the UI at `http://localhost:5173`. If `VITE_API_BASE_URL` is empty, 
 | `APP_ENV` | `development` or `production` behavior | `production` |
 | `DATABASE_URL` | SQLAlchemy PostgreSQL connection string | Supabase PostgreSQL URL with `sslmode=require` |
 | `ADMIN_API_TOKEN` | Bearer token for administrative write routes | Required; keep only in backend secrets |
+| `GEMINI_API_KEY` | Credential for Gemini-backed analysis | Set in Render; never expose to the frontend |
+| `GEMINI_MODEL` | Gemini model name | `gemini-3.5-flash-lite` in deployment |
 | `CORS_ORIGINS` | Comma-separated browser origins | Explicit Vercel origin(s); no wildcard |
 | `DB_POOL_SIZE` | SQLAlchemy pool connections per worker | Size against Supabase limits |
 | `DB_MAX_OVERFLOW` | Temporary extra connections per worker | Size against Supabase limits |
@@ -60,16 +62,18 @@ The configured token is compared in constant time and is not logged. Do not put 
 ### Vercel: React + Vite
 
 1. Import the GitHub repository as a Vercel project.
-2. Set the project root to `frontend`. Use `npm ci` for install and `npm run build` for build; Vite outputs `dist`.
+2. Configure **Root Directory** as `frontend`, **Build Command** as `npm run build`, and **Output Directory** as `dist`. Vercel installs the npm dependencies from `frontend/package-lock.json` (`npm ci`).
 3. Add `VITE_API_BASE_URL` in Vercel project environment settings when the Render API URL has been created. This value is public.
 4. Add the resulting exact Vercel origin to the Render `CORS_ORIGINS` setting. No Vercel domain is assumed in this repository.
 5. Preview deployments have distinct origins; add only the preview origins you intend to permit.
 
 ### Render: FastAPI
 
-`render.yaml` is a local Blueprint starting point; it does not create a service and has `autoDeploy: false`. It runs two Uvicorn workers, checks `/ready`, and leaves database URL, admin token, and CORS origins as dashboard-managed secrets/settings. Review the worker and pool sizes against the selected Render instance and Supabase connection limits before creating the service.
+`render.yaml` defines a Python web service; creating/importing the Blueprint provisions it. It installs `requirements.txt`, starts Uvicorn on Render's `$PORT` with two workers, checks `/ready`, and keeps `autoDeploy: false` until the first deployment has been tested successfully. It defines `APP_ENV=production`, `GEMINI_MODEL=gemini-3.5-flash-lite`, and the database pool defaults. `DATABASE_URL`, `ADMIN_API_TOKEN`, `GEMINI_API_KEY`, and `CORS_ORIGINS` are dashboard-managed values (`sync: false`). Review the worker and pool sizes against the selected Render instance and Supabase connection limits before creating the service.
 
-Set `APP_ENV=production`, `DATABASE_URL`, `ADMIN_API_TOKEN`, and `CORS_ORIGINS` in Render. Production startup rejects a missing admin token, missing CORS origins, non-PostgreSQL URL, or PostgreSQL URL without an SSL mode of `require`, `verify-ca`, or `verify-full`. Use the Supabase pooler URL appropriate for the server workload and keep SSL enabled.
+The Blueprint supplies `APP_ENV`, `GEMINI_MODEL`, and pool defaults. Set `DATABASE_URL`, `ADMIN_API_TOKEN`, `GEMINI_API_KEY`, and `CORS_ORIGINS` in Render. Production startup rejects a missing admin token, missing CORS origins, non-PostgreSQL URL, or PostgreSQL URL without an SSL mode of `require`, `verify-ca`, or `verify-full`. Use the Supabase pooler URL appropriate for the server workload and keep SSL enabled. Set `CORS_ORIGINS` to the exact frontend origin(s), comma-separated and without a wildcard. Once the Vercel project is deployed, copy its public origin into this setting and redeploy/restart the API if needed.
+
+After deployment, check `https://<render-service-host>/health` for process liveness and `/ready` for database readiness (a database outage returns HTTP 503). The public browser frontend calls the Render API using `VITE_API_BASE_URL`; this is a public URL, never a credential. Administrative write routes require `Authorization: Bearer <ADMIN_API_TOKEN>` outside local development. Verify a protected route without a token returns HTTP 401, and send the token only from a trusted operator tool or server-side client, never from Vercel/browser code.
 
 The application currently calls `Base.metadata.create_all()` at startup. It has not been removed because a safe migration baseline has not been generated and checked against the existing Supabase schema. Treat schema verification and the initial Alembic baseline as a deployment blocker; do not rely on production startup to evolve an existing schema.
 
