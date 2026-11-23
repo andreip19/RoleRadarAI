@@ -51,6 +51,9 @@ jobs:
       - name: Run Ruff
         run: python -m ruff check backend scraper scripts
 
+      - name: Validate Alembic configuration and head
+        run: python -m alembic heads
+
       - name: Run automated tests
         run: python -m pytest -v
 
